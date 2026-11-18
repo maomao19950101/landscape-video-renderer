@@ -88,6 +88,29 @@ def render_video(
     }
 
 
+def _is_apple_silicon() -> bool:
+    """检测当前机器是否为 Apple Silicon (macOS arm64)。"""
+    return sys.platform == "darwin" and os.uname().machine == "arm64"
+
+
+def _get_hwaccel_input_args() -> list[str]:
+    """获取硬件解码参数。"""
+    if _is_apple_silicon():
+        return ["-hwaccel", "videotoolbox"]
+    return []
+
+
+def _get_hw_encoder_args() -> list[str]:
+    """获取专用硬件编码参数。"""
+    if _is_apple_silicon():
+        # Apple Silicon Media Engine 硬件直通编码 (极速 60-120fps 4K 导出)
+        return ["-c:v", "h264_videotoolbox", "-b:v", "28M", "-pix_fmt", "yuv420p"]
+    return [
+        "-c:v", "libx264", "-preset", "medium",
+        "-crf", "18", "-pix_fmt", "yuv420p",
+    ]
+
+
 def _render_ffmpeg_fast(
     video_path: str,
     output_path: str,
@@ -141,8 +164,10 @@ def _render_ffmpeg_fast(
 
     filter_chain = ",".join(filters) if filters else "null"
 
-    # 构建 FFmpeg 命令
-    cmd = ["ffmpeg", "-y", "-v", "quiet", "-i", video_path]
+    # 构建 FFmpeg 命令（Apple Silicon VideoToolbox 硬件直通）
+    cmd = ["ffmpeg", "-y"]
+    cmd += _get_hwaccel_input_args()
+    cmd += ["-v", "quiet", "-i", video_path]
 
     if info["has_audio"]:
         cmd += [
@@ -153,11 +178,7 @@ def _render_ffmpeg_fast(
     else:
         cmd += ["-vf", filter_chain]
 
-    cmd += [
-        "-c:v", "libx264", "-preset", "medium",
-        "-crf", "18", "-pix_fmt", "yuv420p",
-        output_path,
-    ]
+    cmd += _get_hw_encoder_args() + [output_path]
 
     subprocess.run(cmd, check=True)
 
@@ -183,12 +204,11 @@ def _render_framewise(
         frames_dir.mkdir()
         output_frames_dir.mkdir()
 
-        # 解码所有帧
-        subprocess.run(
-            ["ffmpeg", "-y", "-v", "quiet", "-i", video_path,
-             "-q:v", "2", str(frames_dir / "frame_%06d.jpg")],
-            check=True,
-        )
+        # 解码所有帧 (Apple Silicon VideoToolbox 硬件直通)
+        decode_cmd = ["ffmpeg", "-y"]
+        decode_cmd += _get_hwaccel_input_args()
+        decode_cmd += ["-v", "quiet", "-i", video_path, "-q:v", "2", str(frames_dir / "frame_%06d.jpg")]
+        subprocess.run(decode_cmd, check=True)
 
         # 逐帧渲染（多核并行 + 蒙版预计算）
         frame_files = sorted(frames_dir.glob("frame_*.jpg"))
@@ -219,11 +239,7 @@ def _render_framewise(
         if info["has_audio"]:
             encode_cmd += ["-i", video_path, "-map", "0:v", "-map", "1:a", "-c:a", "copy"]
 
-        encode_cmd += [
-            "-c:v", "libx264", "-preset", "medium",
-            "-crf", "18", "-pix_fmt", "yuv420p",
-            output_path,
-        ]
+        encode_cmd += _get_hw_encoder_args() + [output_path]
         subprocess.run(encode_cmd, check=True)
 
     return actual_count
