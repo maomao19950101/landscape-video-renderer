@@ -1,6 +1,7 @@
 """单帧预览生成器 — 抽取代表帧 + 应用风格预览"""
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,10 +18,40 @@ from focus_detector import compute_ellipse_axes, detect_focus
 from presets import get_preset
 
 
+def get_ffmpeg_bin() -> str:
+    """跨平台获取 ffmpeg 可执行文件路径（优先 PATH，备选 bin 目录）。"""
+    f = shutil.which("ffmpeg")
+    if f:
+        return f
+    for cand in [
+        Path("bin/ffmpeg.exe"), Path("bin/ffmpeg"),
+        _SCRIPT_DIR.parent / "bin" / "ffmpeg.exe",
+        _SCRIPT_DIR.parent / "bin" / "ffmpeg"
+    ]:
+        if cand.exists():
+            return str(cand.resolve())
+    return "ffmpeg"
+
+
+def get_ffprobe_bin() -> str:
+    """跨平台获取 ffprobe 可执行文件路径。"""
+    f = shutil.which("ffprobe")
+    if f:
+        return f
+    for cand in [
+        Path("bin/ffprobe.exe"), Path("bin/ffprobe"),
+        _SCRIPT_DIR.parent / "bin" / "ffprobe.exe",
+        _SCRIPT_DIR.parent / "bin" / "ffprobe"
+    ]:
+        if cand.exists():
+            return str(cand.resolve())
+    return "ffprobe"
+
+
 def get_video_info(video_path: str) -> dict:
     """使用 ffprobe 获取视频元数据。"""
     cmd = [
-        "ffprobe", "-v", "quiet",
+        get_ffprobe_bin(), "-v", "quiet",
         "-print_format", "json",
         "-show_format", "-show_streams",
         video_path,
@@ -64,7 +95,7 @@ def extract_representative_frame(video_path: str, output_path: str, duration: fl
     # 取视频 40% 位置的帧（通常比正中间更有代表性）
     seek_time = max(0, duration * 0.4)
     cmd = [
-        "ffmpeg", "-y", "-v", "quiet",
+        get_ffmpeg_bin(), "-y", "-v", "quiet",
         "-ss", str(seek_time),
         "-i", video_path,
         "-frames:v", "1",

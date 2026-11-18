@@ -20,6 +20,7 @@ from focus_detector import compute_ellipse_axes, detect_focus
 from presets import get_preset
 from preview_generator import (
     apply_style_to_frame,
+    get_ffmpeg_bin,
     get_video_info,
     precompute_vignette_masks,
 )
@@ -69,7 +70,7 @@ def render_video(
     with tempfile.TemporaryDirectory() as tmpdir:
         first_frame = str(Path(tmpdir) / "first.jpg")
         subprocess.run(
-            ["ffmpeg", "-y", "-v", "quiet", "-i", video_path,
+            [get_ffmpeg_bin(), "-y", "-v", "quiet", "-i", video_path,
              "-frames:v", "1", "-q:v", "2", first_frame],
             check=True,
         )
@@ -88,27 +89,64 @@ def render_video(
     }
 
 
-def _is_apple_silicon() -> bool:
-    """检测当前机器是否为 Apple Silicon (macOS arm64)。"""
-    return sys.platform == "darwin" and os.uname().machine == "arm64"
+_PROBED_HARDWARE_CONFIG = None
+
+
+def _probe_hardware_config():
+    """跨平台硬件加速自适应检测 (macOS VideoToolbox, Windows NVENC/QSV/AMF, Linux NVENC, 或 CPU libx264)。"""
+    global _PROBED_HARDWARE_CONFIG
+    if _PROBED_HARDWARE_CONFIG is not None:
+        return _PROBED_HARDWARE_CONFIG
+
+    ffmpeg_bin = get_ffmpeg_bin()
+    encoders_text = ""
+    try:
+        res = subprocess.run([ffmpeg_bin, "-encoders"], capture_output=True, text=True)
+        encoders_text = res.stdout
+    except Exception:
+        pass
+
+    hwaccel_in = []
+    encoder_args = ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+
+    if sys.platform == "darwin":
+        # macOS 平台：优先调用 Apple Silicon Media Engine 硬件直通
+        if "h264_videotoolbox" in encoders_text:
+            hwaccel_in = ["-hwaccel", "videotoolbox"]
+            encoder_args = ["-c:v", "h264_videotoolbox", "-b:v", "28M", "-pix_fmt", "yuv420p"]
+    elif sys.platform.startswith("win") or sys.platform.startswith("cygwin"):
+        # Windows 平台：优先检测 NVIDIA NVENC (RTX / GTX 独显硬件加速)
+        if "h264_nvenc" in encoders_text:
+            hwaccel_in = ["-hwaccel", "d3d11va"]
+            encoder_args = ["-c:v", "h264_nvenc", "-b:v", "28M", "-preset", "p5", "-pix_fmt", "yuv420p"]
+        # Windows 平台：检测 Intel QuickSync (酷睿核显/独显硬件加速)
+        elif "h264_qsv" in encoders_text:
+            hwaccel_in = ["-hwaccel", "qsv"]
+            encoder_args = ["-c:v", "h264_qsv", "-b:v", "28M", "-pix_fmt", "nv12"]
+        # Windows 平台：检测 AMD AMF (Radeon 显卡硬件加速)
+        elif "h264_amf" in encoders_text:
+            hwaccel_in = ["-hwaccel", "d3d11va"]
+            encoder_args = ["-c:v", "h264_amf", "-b:v", "28M", "-pix_fmt", "yuv420p"]
+    else:
+        # Linux 平台：检测 NVENC
+        if "h264_nvenc" in encoders_text:
+            hwaccel_in = ["-hwaccel", "cuda"]
+            encoder_args = ["-c:v", "h264_nvenc", "-b:v", "28M", "-preset", "p5", "-pix_fmt", "yuv420p"]
+
+    _PROBED_HARDWARE_CONFIG = (hwaccel_in, encoder_args)
+    return _PROBED_HARDWARE_CONFIG
 
 
 def _get_hwaccel_input_args() -> list[str]:
     """获取硬件解码参数。"""
-    if _is_apple_silicon():
-        return ["-hwaccel", "videotoolbox"]
-    return []
+    hw_in, _ = _probe_hardware_config()
+    return hw_in
 
 
 def _get_hw_encoder_args() -> list[str]:
     """获取专用硬件编码参数。"""
-    if _is_apple_silicon():
-        # Apple Silicon Media Engine 硬件直通编码 (极速 60-120fps 4K 导出)
-        return ["-c:v", "h264_videotoolbox", "-b:v", "28M", "-pix_fmt", "yuv420p"]
-    return [
-        "-c:v", "libx264", "-preset", "medium",
-        "-crf", "18", "-pix_fmt", "yuv420p",
-    ]
+    _, enc_args = _probe_hardware_config()
+    return enc_args
 
 
 def _render_ffmpeg_fast(
@@ -164,8 +202,8 @@ def _render_ffmpeg_fast(
 
     filter_chain = ",".join(filters) if filters else "null"
 
-    # 构建 FFmpeg 命令（Apple Silicon VideoToolbox 硬件直通）
-    cmd = ["ffmpeg", "-y"]
+    # 构建 FFmpeg 命令（跨平台硬件加速）
+    cmd = [get_ffmpeg_bin(), "-y"]
     cmd += _get_hwaccel_input_args()
     cmd += ["-v", "quiet", "-i", video_path]
 
@@ -204,8 +242,8 @@ def _render_framewise(
         frames_dir.mkdir()
         output_frames_dir.mkdir()
 
-        # 解码所有帧 (Apple Silicon VideoToolbox 硬件直通)
-        decode_cmd = ["ffmpeg", "-y"]
+        # 解码所有帧 (跨平台硬件直通)
+        decode_cmd = [get_ffmpeg_bin(), "-y"]
         decode_cmd += _get_hwaccel_input_args()
         decode_cmd += ["-v", "quiet", "-i", video_path, "-q:v", "2", str(frames_dir / "frame_%06d.jpg")]
         subprocess.run(decode_cmd, check=True)
@@ -230,7 +268,7 @@ def _render_framewise(
 
         # 编码回视频
         encode_cmd = [
-            "ffmpeg", "-y", "-v", "quiet",
+            get_ffmpeg_bin(), "-y", "-v", "quiet",
             "-framerate", str(info["fps"]),
             "-i", str(output_frames_dir / "frame_%06d.jpg"),
         ]
