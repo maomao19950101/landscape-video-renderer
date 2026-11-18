@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+.pytest_cache/
+
+# System & OS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Media & Temporary files
+*.mp4
+*.MP4
+*.mov
+*.MOV
+*.mkv
+*.MKV
+*.jpg
+*.jpeg
+*.png
+*.tmp
+*.log
