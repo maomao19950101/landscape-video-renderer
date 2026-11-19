@@ -225,6 +225,34 @@ def apply_style_to_frame(
         blend_strength = params["bloom_intensity"]
         arr = np.clip(1.0 - (1.0 - arr) * (1.0 - bloom_arr * blend_strength), 0, 1)
 
+    # === 第四层：Halation 胶片橙红高光漫射（模拟经典胶卷背底反射红晕）===
+    if params.get("halation_enabled") and params.get("halation_intensity", 0) > 0:
+        # 卤化银感光乳胶层的物理特性：红光穿透力最强并在底片基底反射，高光边缘呈现暖红橙色晕染
+        red_weighted_lum = 0.5 * arr[:, :, 0] + 0.35 * arr[:, :, 1] + 0.15 * arr[:, :, 2]
+        thresh = params.get("halation_threshold", 0.78)
+        h_mask = np.clip((red_weighted_lum - thresh) / max(0.01, 1.0 - thresh), 0, 1)
+
+        if np.max(h_mask) > 0.01:
+            # 经典 Kodak Vision3 暖橙红光谱着色
+            tint_color = np.array([1.0, 0.28, 0.05], dtype=np.float32)
+            halation_raw = h_mask[:, :, np.newaxis] * tint_color
+
+            # 4x 降采样高斯扩散
+            radius = params.get("halation_radius", 25)
+            down = 4 if max(w, h) >= 1920 else 2
+            sw, sh = max(1, w // down), max(1, h // down)
+            h_small = Image.fromarray((halation_raw * 255).astype(np.uint8)).resize(
+                (sw, sh), Image.Resampling.BILINEAR
+            )
+            h_blurred = h_small.filter(ImageFilter.GaussianBlur(radius=radius / down))
+            h_large = h_blurred.resize((w, h), Image.Resampling.BILINEAR)
+            h_arr = np.array(h_large, dtype=np.float32) / 255.0
+
+            # 叠加大片红晕，配合高光滚降保护
+            h_intensity = params.get("halation_intensity", 0.35)
+            roll_off = np.clip(1.0 - arr, 0, 1)
+            arr = np.clip(arr + h_arr * h_intensity * roll_off, 0, 1)
+
     # === 胶片颗粒 ===
     if params["grain_amount"] > 0:
         noise = np.random.normal(0, params["grain_amount"], arr.shape).astype(np.float32)

@@ -79,6 +79,27 @@ uv run --with numpy --with Pillow python3 scripts/ken_burns_generator.py \
   --zoom-end 1.25
 ```
 
+### 4. 行业通用 3D LUT (.cube) 导入与极速渲染
+支持直接载入达芬奇/剪映/PR 格式的标准 3D LUT 文件：
+```bash
+cd ~/.gemini/config/skills/landscape-video-renderer
+# 图片应用 LUT
+uv run --with numpy --with Pillow python3 scripts/lut_engine.py <input.jpg> <output.jpg> --lut <file.cube 或 内置LUT名>
+# 视频硬件加速应用 LUT
+uv run --with numpy --with Pillow python3 scripts/lut_engine.py <input.mp4> <output.mp4> --lut <file.cube 或 内置LUT名>
+```
+内置电影 LUT：`kodak_portra_400`、`fuji_eterna_cinema`、`teal_and_orange`。
+
+### 5. 参考图一键色彩克隆 (Color Match 智能仿色)
+随手截一张网红风景美图作为参考，自动提取色彩风格并同步输出行业标准 3D `.cube` 文件：
+```bash
+cd ~/.gemini/config/skills/landscape-video-renderer
+# 图像一键仿色
+uv run --with numpy --with Pillow python3 scripts/color_matcher.py <source.jpg> --ref <reference.jpg> -o <output.jpg> [--export-lut <output.cube>]
+# 视频硬件直通一键仿色
+uv run --with numpy --with Pillow python3 scripts/color_matcher.py <source.mp4> --ref <reference.jpg> -o <output.mp4>
+```
+
 ## 自然语言微调映射
 
 用户对预览提出修改要求时，将其自然语言映射到对应参数变更：

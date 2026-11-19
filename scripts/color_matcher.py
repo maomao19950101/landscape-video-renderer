@@ -1,0 +1,257 @@
+"""参考图一键色彩克隆与风格迁移引擎 (Reinhard Color Transfer & 3D LUT Generator)
+
+支持随手截取任何网络精美大片、电影剧照或网红风光图作为参考：
+- 自动提取参考图的色彩基调、色温、冷暖色调与对比分布
+- 基于 CIELAB 空间无相关色度统计迁移（Reinhard et al. 经典算法）
+- 支持纯色彩迁移模式（Preserve Luminance）：仅克隆色彩风格，保留原片自然明暗与景深
+- 自动导出 33x33x33 行业标准 .cube 3D LUT，支持一键载入达芬奇/剪映/PR
+- 视频直通：自动由参考图生成 3D LUT 并通过硬件加速直接渲染全片视频
+"""
+
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Optional, Tuple, Union
+
+import numpy as np
+from PIL import Image
+
+_SCRIPT_DIR = Path(__file__).parent
+sys.path.insert(0, str(_SCRIPT_DIR))
+
+from preview_generator import extract_representative_frame, get_ffmpeg_bin, get_video_info
+from render_engine import _get_hw_encoder_args, _get_hwaccel_input_args
+
+
+def _rgb_to_lab(rgb: np.ndarray) -> np.ndarray:
+    """浮点 RGB (0~1) 转换为 CIELAB 空间。"""
+    # sRGB 转 Linear RGB
+    mask = rgb > 0.04045
+    linear = np.where(mask, ((rgb + 0.055) / 1.055) ** 2.4, rgb / 12.92)
+
+    # Linear RGB 转 XYZ (D65 白点)
+    matrix = np.array([
+        [0.4124564, 0.3575761, 0.1804375],
+        [0.2126729, 0.7151522, 0.0721750],
+        [0.0193339, 0.1191920, 0.9503041]
+    ]).T
+    xyz = np.dot(linear, matrix) / np.array([0.95047, 1.00000, 1.08883])
+
+    # XYZ 转 Lab
+    mask = xyz > 0.008856
+    f_xyz = np.where(mask, np.cbrt(xyz), 7.787 * xyz + 16.0 / 116.0)
+    L = 116.0 * f_xyz[:, :, 1] - 16.0
+    a = 500.0 * (f_xyz[:, :, 0] - f_xyz[:, :, 1])
+    b = 200.0 * (f_xyz[:, :, 1] - f_xyz[:, :, 2])
+    return np.stack([L, a, b], axis=-1)
+
+
+def _lab_to_rgb(lab: np.ndarray) -> np.ndarray:
+    """CIELAB 空间转换为浮点 RGB (0~1)。"""
+    L, a, b = lab[:, :, 0], lab[:, :, 1], lab[:, :, 2]
+    fy = (L + 16.0) / 116.0
+    fx = a / 500.0 + fy
+    fz = fy - b / 200.0
+
+    fx3 = fx ** 3
+    fz3 = fz ** 3
+    x = np.where(fx3 > 0.008856, fx3, (fx - 16.0 / 116.0) / 7.787)
+    y = np.where(L > 903.3 * 0.008856, ((L + 16.0) / 116.0) ** 3, L / 903.3)
+    z = np.where(fz3 > 0.008856, fz3, (fz - 16.0 / 116.0) / 7.787)
+    xyz = np.stack([x * 0.95047, y * 1.00000, z * 1.08883], axis=-1)
+
+    # XYZ 转 Linear RGB
+    matrix = np.array([
+        [ 3.2404542, -1.5371385, -0.4985314],
+        [-0.9692660,  1.8760108,  0.0415560],
+        [ 0.0556434, -0.2040259,  1.0572252]
+    ]).T
+    linear = np.dot(xyz, matrix)
+    linear = np.clip(linear, 0.0, 1.0)
+
+    # Linear 转 sRGB
+    mask = linear > 0.0031308
+    srgb = np.where(mask, 1.055 * (linear ** (1.0 / 2.4)) - 0.055, 12.92 * linear)
+    return np.clip(srgb, 0.0, 1.0)
+
+
+def compute_transfer_stats(source_rgb: np.ndarray, ref_rgb: np.ndarray):
+    """计算源图像与参考图像的统计矩阵。"""
+    s_lab = _rgb_to_lab(source_rgb)
+    r_lab = _rgb_to_lab(ref_rgb)
+
+    s_mean = np.mean(s_lab, axis=(0, 1))
+    s_std = np.std(s_lab, axis=(0, 1))
+    r_mean = np.mean(r_lab, axis=(0, 1))
+    r_std = np.std(r_lab, axis=(0, 1))
+
+    # 避免标准差为 0 导致除零
+    s_std = np.maximum(s_std, 1e-4)
+    r_std = np.maximum(r_std, 1e-4)
+
+    return s_mean, s_std, r_mean, r_std
+
+
+def transfer_colors(
+    source_rgb: np.ndarray,
+    s_mean: np.ndarray,
+    s_std: np.ndarray,
+    r_mean: np.ndarray,
+    r_std: np.ndarray,
+    strength: float = 0.85,
+    preserve_luminance: bool = True,
+) -> np.ndarray:
+    """根据统计均值与方差执行 CIELAB 迁移变换。"""
+    s_lab = _rgb_to_lab(source_rgb)
+    out_lab = s_lab.copy()
+
+    # 色彩通道 (a, b) 迁移
+    for c in [1, 2]:
+        val = (s_lab[:, :, c] - s_mean[c]) * (r_std[c] / s_std[c]) + r_mean[c]
+        out_lab[:, :, c] = (1.0 - strength) * s_lab[:, :, c] + strength * val
+
+    # 明度通道 (L)：默认建议保持原片本身的采光曝光结构，避免暗图把亮图直接压黑
+    if not preserve_luminance:
+        val = (s_lab[:, :, 0] - s_mean[0]) * (r_std[0] / s_std[0]) + r_mean[0]
+        out_lab[:, :, 0] = (1.0 - strength) * s_lab[:, :, 0] + strength * np.clip(val, 0, 100)
+
+    out_rgb = _lab_to_rgb(out_lab)
+
+    # 高光软膝保护，防止转换溢出
+    roll_off = np.clip(1.0 - source_rgb, 0, 1)
+    return np.clip(out_rgb, 0.0, 1.0)
+
+
+def generate_color_match_cube(
+    source_rgb: np.ndarray,
+    ref_rgb: np.ndarray,
+    output_cube_path: str,
+    strength: float = 0.85,
+    preserve_luminance: bool = True,
+    lut_size: int = 33,
+    title: str = "ColorMatch_Generated",
+) -> str:
+    """根据源图与参考图关系，直接导出 33x33x33 的行业通用 .cube 3D LUT 文件。"""
+    s_mean, s_std, r_mean, r_std = compute_transfer_stats(source_rgb, ref_rgb)
+
+    # 采样 3D 颜色网格
+    grid = np.linspace(0.0, 1.0, lut_size, dtype=np.float32)
+    # 构造 (lut_size^2, lut_size, 3) 形式的色彩空间切片
+    b_vals, g_vals, r_vals = np.meshgrid(grid, grid, grid, indexing="ij")
+    # 展平成单个大图像进行批量向量化转换
+    flat_rgb = np.stack([r_vals, g_vals, b_vals], axis=-1).reshape(-1, lut_size, 3)
+
+    mapped_rgb = transfer_colors(
+        flat_rgb, s_mean, s_std, r_mean, r_std, strength, preserve_luminance
+    ).reshape(-1, 3)
+
+    output_cube_path = str(output_cube_path)
+    os.makedirs(os.path.dirname(os.path.abspath(output_cube_path)), exist_ok=True)
+
+    with open(output_cube_path, "w", encoding="utf-8") as f:
+        f.write("# Adobe 3D LUT generated by landscape-video-renderer ColorMatch\n")
+        f.write(f'TITLE "{title}"\n')
+        f.write(f"LUT_3D_SIZE {lut_size}\n")
+        f.write("DOMAIN_MIN 0.0 0.0 0.0\n")
+        f.write("DOMAIN_MAX 1.0 1.0 1.0\n\n")
+        for i in range(len(mapped_rgb)):
+            ro, go, bo = mapped_rgb[i]
+            f.write(f"{ro:.6f} {go:.6f} {bo:.6f}\n")
+
+    return output_cube_path
+
+
+def match_image_to_reference(
+    source_path: str,
+    reference_path: str,
+    output_path: str,
+    strength: float = 0.85,
+    preserve_luminance: bool = True,
+    export_lut: Optional[str] = None,
+) -> None:
+    """单张图像一键克隆参考图色彩。"""
+    src_im = Image.open(source_path).convert("RGB")
+    ref_im = Image.open(reference_path).convert("RGB")
+
+    # 降采样提取参考特征，大幅加速并平滑噪点
+    ref_im_small = ref_im.resize((512, 512), Image.Resampling.BILINEAR)
+    src_im_small = src_im.resize((512, 512), Image.Resampling.BILINEAR)
+
+    src_arr = np.array(src_im, dtype=np.float32) / 255.0
+    src_stats_arr = np.array(src_im_small, dtype=np.float32) / 255.0
+    ref_arr = np.array(ref_im_small, dtype=np.float32) / 255.0
+
+    s_mean, s_std, r_mean, r_std = compute_transfer_stats(src_stats_arr, ref_arr)
+    matched_arr = transfer_colors(
+        src_arr, s_mean, s_std, r_mean, r_std, strength, preserve_luminance
+    )
+
+    out_im = Image.fromarray((matched_arr * 255.0).astype(np.uint8))
+    out_im.save(output_path, quality=92)
+
+    if export_lut:
+        generate_color_match_cube(
+            src_stats_arr, ref_arr, export_lut, strength, preserve_luminance
+        )
+
+
+def match_video_to_reference(
+    video_path: str,
+    reference_path: str,
+    output_video_path: str,
+    strength: float = 0.85,
+    preserve_luminance: bool = True,
+    export_lut: Optional[str] = None,
+) -> None:
+    """全片视频一键色彩仿色克隆（通过 3D LUT + 硬件加速极速输出）。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # 1. 抽取代表帧
+        rep_frame = str(Path(tmpdir) / "rep_frame.jpg")
+        info = get_video_info(video_path)
+        extract_representative_frame(video_path, rep_frame, info["duration"])
+
+        # 2. 生成对应的 3D LUT
+        cube_path = export_lut or str(Path(tmpdir) / "matched.cube")
+        src_im = Image.open(rep_frame).convert("RGB").resize((512, 512))
+        ref_im = Image.open(reference_path).convert("RGB").resize((512, 512))
+
+        src_arr = np.array(src_im, dtype=np.float32) / 255.0
+        ref_arr = np.array(ref_im, dtype=np.float32) / 255.0
+
+        generate_color_match_cube(
+            src_arr, ref_arr, cube_path, strength, preserve_luminance
+        )
+
+        # 3. 硬件直通渲染全片视频
+        from lut_engine import apply_lut_to_video
+        apply_lut_to_video(video_path, cube_path, output_video_path)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="参考图色彩一键克隆与迁移工具")
+    parser.add_argument("input", help="输入图像或视频路径")
+    parser.add_argument("--ref", required=True, help="参考图路径（你想模仿的样片）")
+    parser.add_argument("-o", "--output", required=True, help="输出文件路径")
+    parser.add_argument("--strength", type=float, default=0.85, help="迁移强度 0.0~1.0")
+    parser.add_argument("--keep-luma", action="store_true", default=True, help="保留原片自然明度")
+    parser.add_argument("--export-lut", help="可选导出的 .cube 3D LUT 文件路径")
+
+    args = parser.parse_args()
+
+    ext = Path(args.input).suffix.lower()
+    if ext in [".mp4", ".mov", ".mkv", ".ts"]:
+        print(f"🎬 启动视频色彩克隆: 参考 {args.ref} -> {args.output}")
+        match_video_to_reference(
+            args.input, args.ref, args.output, args.strength, args.keep_luma, args.export_lut
+        )
+        print("✅ 视频色彩克隆完成！")
+    else:
+        print(f"📸 启动图像色彩克隆: 参考 {args.ref} -> {args.output}")
+        match_image_to_reference(
+            args.input, args.ref, args.output, args.strength, args.keep_luma, args.export_lut
+        )
+        print("✅ 图像色彩克隆完成！")

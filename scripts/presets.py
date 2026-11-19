@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-# 统一参数结构：每个预设是以下 14 个键的字典
+# 统一参数结构：每个预设是以下 18 个键的字典
 PRESET_TEMPLATE = {
     "vignette_intensity": 0.0,    # 画圈暗角强度 0.0~1.0
     "vignette_radius": 0.5,       # 聚光圈半径（占画面短边比例）0.3~0.8
@@ -13,6 +13,10 @@ PRESET_TEMPLATE = {
     "bloom_threshold": 0.7,       # 高光提取亮度门槛 0.5~0.9
     "bloom_intensity": 0.0,       # 柔光叠加强度 0.0~1.0
     "bloom_radius": 15,           # 柔光扩散模糊半径 (px) 5~50
+    "halation_enabled": False,    # 是否启用胶片橙红高光漫射 (Halation)
+    "halation_intensity": 0.0,    # 胶片红晕强度 0.0~1.0
+    "halation_radius": 25,        # 胶片红晕扩散半径 (px) 10~50
+    "halation_threshold": 0.78,   # 触发红晕的极高光门槛 0.7~0.95
     "color_temp_shift": 0,        # 色温偏移（负冷正暖）-30~+30
     "saturation_adj": 0.0,        # 饱和度调整 -0.3~+0.3
     "tint_shadows": None,         # 暗部着色 hex (如 "#1a1a2e") 或 None
@@ -37,6 +41,10 @@ PRESETS = {
             "bloom_threshold": 0.75,
             "bloom_intensity": 0.35,
             "bloom_radius": 30,
+            "halation_enabled": True,
+            "halation_intensity": 0.20,
+            "halation_radius": 25,
+            "halation_threshold": 0.82,
             "color_temp_shift": 12,
             "saturation_adj": 0.05,
             "tint_shadows": "#2d1b4e",
@@ -83,6 +91,10 @@ PRESETS = {
             "bloom_threshold": 0.55,
             "bloom_intensity": 0.45,
             "bloom_radius": 25,
+            "halation_enabled": True,
+            "halation_intensity": 0.35,
+            "halation_radius": 30,
+            "halation_threshold": 0.80,
             "color_temp_shift": 25,
             "saturation_adj": 0.1,
             "tint_shadows": "#1a0a00",
@@ -198,6 +210,10 @@ PRESETS = {
             "bloom_threshold": 0.7,
             "bloom_intensity": 0.0,
             "bloom_radius": 10,
+            "halation_enabled": True,
+            "halation_intensity": 0.40,
+            "halation_radius": 25,
+            "halation_threshold": 0.78,
             "color_temp_shift": 15,
             "saturation_adj": -0.08,
             "tint_shadows": "#2a1a0a",

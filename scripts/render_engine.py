@@ -77,13 +77,14 @@ def render_video(
         focus = detect_focus(first_frame, user_hint=focus_hint)
 
     # 质量优先策略路由：
-    # 1. 启用了 Bloom 柔光漫射 -> 必须走 Python 逐帧（需高斯扩散）
+    # 1. 启用了 Bloom 柔光漫射或 Halation 胶片红晕 -> 必须走 Python 逐帧（需高斯扩散与暖红扩散）
     # 2. 含有高光/暗部色彩分区染色 (tint_shadows / tint_highlights) -> 走 Python 逐帧（确保与照片 100% 质感一致，四周平滑通透）
     # 3. 基础调色且无复杂色彩映射 -> 走 FFmpeg 硬件加速滤镜链
     has_bloom = params.get("bloom_enabled") and params.get("bloom_intensity", 0) > 0
+    has_halation = params.get("halation_enabled") and params.get("halation_intensity", 0) > 0
     has_split_tint = bool(params.get("tint_shadows") or params.get("tint_highlights"))
 
-    if has_bloom or has_split_tint:
+    if has_bloom or has_halation or has_split_tint:
         frames = _render_framewise(video_path, output_path, params, focus, info, progress_callback)
     else:
         frames = _render_ffmpeg_fast(video_path, output_path, params, focus, info)
