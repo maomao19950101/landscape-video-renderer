@@ -160,27 +160,36 @@ def apply_style_to_frame(
                 arr[:, :, c] + shadow_mask[:, :, 0] * tint[c] * 0.15, 0, 1
             )
 
-    # 高光着色
+    # 高光着色（带高光滚降保护，避免纯白区域溢出死白）
     if params["tint_highlights"]:
         tint = _hex_to_rgb(params["tint_highlights"])
         luminance = np.mean(arr, axis=2, keepdims=True)
         highlight_mask = np.clip(luminance * 2.0 - 0.8, 0, 1)
         for c in range(3):
+            roll_off = np.clip(1.0 - arr[:, :, c], 0, 1)
             arr[:, :, c] = np.clip(
-                arr[:, :, c] + highlight_mask[:, :, 0] * tint[c] * 0.12, 0, 1
+                arr[:, :, c] + highlight_mask[:, :, 0] * tint[c] * 0.10 * roll_off, 0, 1
             )
 
-    # === 第二层：画圈视线聚焦（椭圆渐变蒙版）===
+    # === 第二层：画圈视线聚焦（椭圆渐变蒙版 + 电影级高光保护提亮）===
     if precomputed_masks is not None:
         vignette_mask, brightness_boost, contrast_boost = precomputed_masks
     else:
         vignette_mask, brightness_boost, contrast_boost = precompute_vignette_masks(w, h, params, focus)
 
+    # 电影级高光保护提亮 (Highlight Roll-off Soft Knee)
+    # 提亮仅作用于暗部与中间调，当像素接近 1.0 时提亮增量平滑衰减归零，杜绝过曝死白
     for c in range(3):
-        arr[:, :, c] = np.clip(arr[:, :, c] + brightness_boost, 0, 1)
+        roll_off = np.clip(1.0 - arr[:, :, c], 0, 1) ** 1.5
+        arr[:, :, c] = np.clip(arr[:, :, c] + brightness_boost * roll_off, 0, 1)
         arr[:, :, c] = np.clip(
             0.5 + (arr[:, :, c] - 0.5) * (1.0 + contrast_boost), 0, 1
         )
+
+    # 高光恢复压暗 (Highlight Knee Roll-off 胶片高光回拉，防止极端高光丢失云彩与落日轮廓)
+    lum = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+    highlight_knee = np.maximum(0.0, lum - 0.75) / 0.25
+    arr = arr * (1.0 - 0.08 * highlight_knee[:, :, np.newaxis])
 
     # 背景压暗
     intensity = params["vignette_intensity"]

@@ -72,11 +72,13 @@ def _render_frame_worker(args):
         cropped = img.crop((int(x1), int(y1), int(x2), int(y2)))
         resized = cropped.resize((target_w, target_h), Image.Resampling.BILINEAR)
 
-        # 电影感微光呼吸效应（极微妙的明暗起伏，让静止画面充满生命力）
+        # 电影感微光呼吸效应（带高光保护，只在中间调与暗部轻微呼吸，绝不让高光过曝）
         if breathing:
-            breath_factor = 1.0 + 0.018 * math.sin(t * math.pi * 3.0)
-            arr = np.array(resized, dtype=np.float32) * breath_factor
-            arr = np.clip(arr, 0, 255).astype(np.uint8)
+            breath_delta = 0.015 * math.sin(t * math.pi * 3.0)
+            arr = np.array(resized, dtype=np.float32)
+            # 保护因子：亮度越高，呼吸增益越平滑归零 (Soft Knee)
+            roll_off = np.clip(1.0 - arr / 255.0, 0, 1) ** 1.5
+            arr = np.clip(arr + arr * breath_delta * roll_off, 0, 255).astype(np.uint8)
             return frame_idx, arr.tobytes()
 
         return frame_idx, resized.tobytes()
