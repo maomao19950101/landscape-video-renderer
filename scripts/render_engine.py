@@ -76,7 +76,14 @@ def render_video(
         )
         focus = detect_focus(first_frame, user_hint=focus_hint)
 
-    if params["bloom_enabled"] and params["bloom_intensity"] > 0:
+    # 质量优先策略路由：
+    # 1. 启用了 Bloom 柔光漫射 -> 必须走 Python 逐帧（需高斯扩散）
+    # 2. 含有高光/暗部色彩分区染色 (tint_shadows / tint_highlights) -> 走 Python 逐帧（确保与照片 100% 质感一致，四周平滑通透）
+    # 3. 基础调色且无复杂色彩映射 -> 走 FFmpeg 硬件加速滤镜链
+    has_bloom = params.get("bloom_enabled") and params.get("bloom_intensity", 0) > 0
+    has_split_tint = bool(params.get("tint_shadows") or params.get("tint_highlights"))
+
+    if has_bloom or has_split_tint:
         frames = _render_framewise(video_path, output_path, params, focus, info, progress_callback)
     else:
         frames = _render_ffmpeg_fast(video_path, output_path, params, focus, info)
@@ -185,10 +192,10 @@ def _render_ffmpeg_fast(
     if eq_parts:
         filters.append(f"eq={':'.join(eq_parts)}")
 
-    # 暗角 (直接使用计算好的像素坐标与宽高比)
+    # 暗角 (校准衰减曲线：使用更柔和的 PI/(10 - vi*4) 弧度，避免四周死黑与压暗过度)
     vi = params["vignette_intensity"]
     if vi > 0:
-        angle = f"PI/{max(2, int(6 - vi * 4))}"
+        angle = f"PI/{max(4, int(10 - vi * 4))}"
         x0_px = int(cx * w)
         y0_px = int(cy * h)
         aspect_val = f"{w}/{h}"

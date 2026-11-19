@@ -67,6 +67,18 @@ cd ~/.gemini/config/skills/landscape-video-renderer
 uv run --with numpy --with Pillow python3 scripts/render_engine.py <input.mp4> <preset_name> <output.mp4> [cx cy]
 ```
 
+### 3. 静态超清照片 ➔ 电影感运镜短视频 (Ken Burns 模式)
+支持将 8K/4K 超高像素风光照片（如 Ace Pro 2、单反照片）转化为 4K 电影级运镜短视频：
+```bash
+cd ~/.gemini/config/skills/landscape-video-renderer
+uv run --with numpy --with Pillow python3 scripts/ken_burns_generator.py \
+  <image.jpg> <output.mp4> \
+  --duration 12.0 \
+  --fps 30 \
+  --audio <optional_ambient_video_or_audio.mp4> \
+  --zoom-end 1.25
+```
+
 ## 自然语言微调映射
 
 用户对预览提出修改要求时，将其自然语言映射到对应参数变更：
